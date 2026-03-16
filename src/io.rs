@@ -1,6 +1,7 @@
 pub type KeyboardKey = raylib::ffi::KeyboardKey;
 pub type MouseButton = raylib::ffi::MouseButton;
 use lazy_static::lazy_static;
+use raylib::prelude::RaylibDrawHandle;
 use raylib::texture::{RaylibRenderTexture2D, Texture2D};
 #[allow(unused)]
 use raylib::{RaylibHandle, RaylibThread};
@@ -75,6 +76,9 @@ pub struct FrameBuffer {
     pub input: Input,
     pub fg_color: Col,
     pub bg_color: Col,
+    pub last_char: Option<char>,
+    pub frame_char: Option<char>,
+    pub input_string: String,
 }
 
 #[derive(Clone, Debug)]
@@ -155,12 +159,14 @@ impl IOInner {
     }
     pub fn update(&mut self) {
         let mut lock = FRAME_BUFFER.lock().unwrap();
-        lock.update(
+        let mut draw = lock.update(
             &mut self.handle,
             &self.font,
             &self.thread,
             &mut self.render_texture,
         );
+        drop(lock);
+        drop(draw);
     }
 }
 
@@ -226,6 +232,9 @@ impl FrameBuffer {
             input: Input::new(),
             fg_color: Col::Green,
             bg_color: Col::Black,
+            input_string: String::new(),
+            last_char: None,
+            frame_char: None,
         }
     }
 
@@ -248,7 +257,7 @@ impl FrameBuffer {
         let mut y = base_y;
         let mut x = base_x;
         if end_y - base_y > 480 {
-            y -= end_y - base_y - 480;
+            y -= end_y - base_y - 460;
         }
         for i in objects {
             match i {
@@ -296,7 +305,7 @@ impl FrameBuffer {
                 } => {
                     draw.draw_rectangle(x, y, w as i32, h as i32, col.as_color());
                     x += w_round(w as i32);
-                    y += h_round(h as i32);
+                    y += h_round(h as i32 - 20);
                     if x > 640 {
                         x = base_x;
                         y += 20;
@@ -316,14 +325,17 @@ impl FrameBuffer {
         }
     }
 
-    pub fn update(
+    pub fn update<'a>(
         &mut self,
-        handle: &mut RaylibHandle,
+        handle: &'a mut RaylibHandle,
         font: &Font,
         thread: &RaylibThread,
-        texture: &mut RenderTexture2D,
-    ) {
+        texture: &'a mut RenderTexture2D,
+    ) -> RaylibDrawHandle<'a> {
         let should_close = self.input.window_should_close;
+        if should_close {
+            println!("{}", should_close);
+        }
         self.input = generate_input(handle, 2., 2.);
         self.input.window_should_close = self.input.window_should_close || should_close;
         fn h_round(v: i32) -> i32 {
@@ -331,6 +343,41 @@ impl FrameBuffer {
         }
         fn w_round(v: i32) -> i32 {
             if v % 8 != 0 { v + 8 - v % 80 } else { v }
+        }
+        if self.terminal_mode {
+            if let Some(c) = handle.get_char_pressed() {
+                handle_char_input(
+                    &mut self.objects,
+                    c,
+                    self.fg_color,
+                    self.bg_color,
+                    &mut self.input_string,
+                );
+                self.last_char = Some(c);
+                self.frame_char = Some(c);
+            } else if handle.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
+                handle_char_input(
+                    &mut self.objects,
+                    127 as char,
+                    self.fg_color,
+                    self.bg_color,
+                    &mut self.input_string,
+                );
+                self.last_char = Some(127 as char);
+                self.frame_char = Some(127 as char);
+            } else if handle.is_key_pressed(KeyboardKey::KEY_ENTER) {
+                handle_char_input(
+                    &mut self.objects,
+                    '\n',
+                    self.fg_color,
+                    self.bg_color,
+                    &mut self.input_string,
+                );
+                self.last_char = Some('\n');
+                self.frame_char = Some('\n');
+            } else {
+                self.frame_char = None;
+            }
         }
         let mut draw = handle.begin_texture_mode(&thread, texture);
         draw.clear_background(Color::BLACK);
@@ -387,7 +434,7 @@ impl FrameBuffer {
                         col: _,
                     } => {
                         cx += w_round(*w as i32);
-                        cy += h_round(*h as i32);
+                        cy += h_round(*h as i32 - 20);
                         if cx > 640 {
                             cx = base_x;
                             cy += 20;
@@ -489,9 +536,63 @@ impl FrameBuffer {
             Color::WHITE,
         );
         draw.draw_fps(1000, 80);
+        draw
     }
 }
 
+pub fn handle_char_input(
+    objects: &mut Vec<Drawbject>,
+    ch: char,
+    ifg_color: Col,
+    ibg_color: Col,
+    input_string: &mut String,
+) {
+    if let Some(mut c) = objects.pop() {
+        match &mut c {
+            Drawbject::CharSeq {
+                x: _,
+                y: _,
+                max_w: _,
+                user_input,
+                fg_color,
+                bg_color,
+                seq,
+            } => {
+                if *user_input && *fg_color == ifg_color && *bg_color == ibg_color {
+                    if ch == 127 as char {
+                        seq.pop();
+                        if !seq.is_empty() {
+                            objects.push(c);
+                        }
+                        input_string.pop();
+                    } else {
+                        input_string.push(ch);
+                        seq.push(ch);
+                        objects.push(c);
+                    }
+                } else {
+                    objects.push(c);
+                    if ch != 127 as char {
+                        *input_string = ch.to_string();
+                        add_char(objects, ch, ifg_color, ibg_color, true);
+                    }
+                }
+            }
+            _ => {
+                objects.push(c);
+                if ch != 127 as char {
+                    *input_string = ch.to_string();
+                    add_char(objects, ch, ifg_color, ibg_color, true);
+                }
+            }
+        }
+    } else {
+        if ch != 127 as char {
+            *input_string = ch.to_string();
+            add_char(objects, ch, ifg_color, ibg_color, true);
+        }
+    }
+}
 pub fn add_char_seq(
     objects: &mut Vec<Drawbject>,
     chars: &str,
@@ -671,7 +772,8 @@ pub fn put_rect(w: i32, h: i32, col: Col) {
 }
 
 pub fn window_should_close() -> bool {
-    FRAME_BUFFER.lock().unwrap().input.window_should_close
+    let out = FRAME_BUFFER.lock().unwrap().input.window_should_close;
+    out
 }
 
 #[macro_export]
@@ -688,5 +790,8 @@ pub fn run(thread: JoinHandle<()>) {
     let mut io = IOInner::create();
     while !thread.is_finished() {
         io.update();
+        if window_should_close() {
+            break;
+        }
     }
 }
