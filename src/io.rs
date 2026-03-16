@@ -1,42 +1,31 @@
+pub type KeyboardKey = raylib::ffi::KeyboardKey;
+pub type MouseButton = raylib::ffi::MouseButton;
+use lazy_static::lazy_static;
+use raylib::texture::{RaylibRenderTexture2D, Texture2D};
 #[allow(unused)]
 use raylib::{RaylibHandle, RaylibThread};
+#[allow(unused)]
 use raylib::{
     color::Color,
-    ffi::KeyboardKey,
     math::{Rectangle, Vector2},
     prelude::{RaylibDraw, RaylibTextureMode, RaylibTextureModeExt},
     text::Font,
     texture::RenderTexture2D,
 };
-use std::sync::Mutex;
+use std::mem::ManuallyDrop;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
+
+use crate::input::{Input, generate_input};
 pub struct IOInner {
     pub handle: RaylibHandle,
     pub thread: RaylibThread,
-    pub render_texture: RenderTexture2D,
-    pub font: Font,
+    pub render_texture: ManuallyDrop<RenderTexture2D>,
+    pub font: ManuallyDrop<Font>,
+    pub input: Input,
 }
 
-#[derive(Clone, Copy)]
-pub struct CharCell {
-    pub bg_color: Col,
-    pub fg_col: Col,
-    pub is_char: bool,
-    pub ch: char,
-    pub cols: [[Col; 8]; 20],
-}
-
-pub struct FrameBufferInner {
-    pub current_fg_color: Col,
-    pub current_bg_color: Col,
-    pub cursor_x: i16,
-    pub cursor_y: i16,
-    pub last_pressed_char: Option<char>,
-    pub buffer: [[CharCell; 80]; 24],
-    pub input_string: String,
-}
-
-pub static FRAME: Mutex<FrameBufferInner> = Mutex::new(FrameBufferInner::new());
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Col {
     Black,
@@ -58,199 +47,128 @@ pub enum Col {
     Blank,
 }
 
+pub const COLORS: [Col; 17] = [
+    Col::Black,
+    Col::White,
+    Col::Red,
+    Col::Cyan,
+    Col::Violet,
+    Col::Green,
+    Col::Blue,
+    Col::Yellow,
+    Col::Orange,
+    Col::Brown,
+    Col::LightRed,
+    Col::DarkGrey,
+    Col::Grey,
+    Col::LightGreen,
+    Col::LightBlue,
+    Col::LightGrey,
+    Col::Blank,
+];
+
+pub struct FrameBuffer {
+    pub objects: Vec<Drawbject>,
+    pub write_buffer: Vec<Drawbject>,
+    pub images: Vec<Arc<RwLock<ImageInner>>>,
+    pub terminal_mode: bool,
+    pub input: Input,
+    pub fg_color: Col,
+    pub bg_color: Col,
+}
+
+#[derive(Clone, Debug)]
+pub enum Drawbject {
+    Shift {
+        dx: i16,
+        dy: i16,
+    },
+    Move {
+        x: i16,
+        y: i16,
+    },
+    CharSeq {
+        x: i16,
+        y: i16,
+        max_w: i16,
+        user_input: bool,
+        fg_color: Col,
+        bg_color: Col,
+        seq: String,
+    },
+    Rectangle {
+        x: i16,
+        y: i16,
+        w: i16,
+        h: i16,
+        col: Col,
+    },
+    Circle {
+        x: i16,
+        y: i16,
+        r: i16,
+        col: Col,
+    },
+    Image {
+        x: i16,
+        y: i16,
+        w: i16,
+        h: i16,
+        img: Image,
+    },
+}
+#[derive(Clone, Debug)]
+pub struct Image {
+    inner: Arc<RwLock<ImageInner>>,
+}
+pub struct ImageInner {
+    buffer: Box<[Col]>,
+    w: i16,
+    h: i16,
+    as_texture: Option<Texture2D>,
+}
+impl std::fmt::Debug for ImageInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#?}", &self.buffer)
+    }
+}
+lazy_static! {
+    static ref FRAME_BUFFER: Mutex<FrameBuffer> = Mutex::new(FrameBuffer::new());
+}
 impl IOInner {
     pub fn create() -> Self {
-        let (mut handle, thread) = raylib::RaylibBuilder::default().build();
-        let render_texture = handle.load_render_texture(&thread, 640, 480).unwrap();
-        let font = handle.load_font(&thread, "ModernDOS8x16.ttf").unwrap();
+        let (mut handle, thread) = raylib::RaylibBuilder::default()
+            .height(480 * 2)
+            .width(640 * 2)
+            .build();
+        let render_texture =
+            ManuallyDrop::new(handle.load_render_texture(&thread, 640, 480).unwrap());
+        handle.set_target_fps(61);
+        let font = ManuallyDrop::new(handle.load_font(&thread, "ModernDOS8x16.ttf").unwrap());
         Self {
             handle,
             render_texture,
             font,
             thread,
+            input: Input::new(),
         }
     }
     pub fn update(&mut self) {
-        let mut frame = FRAME.lock().unwrap();
-        if let Some(c) = self.handle.get_char_pressed() {
-            frame.last_pressed_char = Some(c);
-            frame.input_string.push(c);
-            frame.put_char(c);
-        } else if self.handle.is_key_pressed(KeyboardKey::KEY_ENTER) {
-            frame.last_pressed_char = Some('\n');
-            frame.input_string.push('\n');
-            frame.put_char('\n');
-        } else if self.handle.is_key_pressed(KeyboardKey::KEY_BACKSPACE) {
-            frame.last_pressed_char = Some(127 as char);
-            frame.input_string.pop();
-            frame.put_char(127 as char);
-        }
-        let mut tex = self
-            .handle
-            .begin_texture_mode(&self.thread, &mut self.render_texture);
-        tex.clear_background(Col::Black.as_color());
-        frame.render(&mut tex, &self.font);
-        drop(tex);
-        drop(frame);
-        let mut draw = self.handle.begin_drawing(&self.thread);
-        draw.clear_background(Col::Black.as_color());
-        draw.draw_texture_pro(
-            &self.render_texture,
-            Rectangle::new(0., 0., 640., -480.),
-            Rectangle::new(0., 0., 640. * 2., 480. * 2.),
-            Vector2::zero(),
-            0.0,
-            Col::White.as_color(),
+        let mut lock = FRAME_BUFFER.lock().unwrap();
+        lock.update(
+            &mut self.handle,
+            &self.font,
+            &self.thread,
+            &mut self.render_texture,
         );
     }
 }
 
-impl FrameBufferInner {
-    pub const fn new() -> Self {
-        Self {
-            last_pressed_char: None,
-            current_bg_color: Col::Black,
-            current_fg_color: Col::Green,
-            buffer: [[CharCell::new(); _]; _],
-            cursor_x: 0,
-            cursor_y: 0,
-            input_string: String::new(),
-        }
-    }
-
-    pub fn render<T>(&mut self, handle: &mut RaylibTextureMode<'_, T>, font: &Font) {
-        for i in 0..self.buffer.len() {
-            for j in 0..self.buffer[0].len() {
-                let c = self.buffer[i][j];
-                if c.is_char {
-                    if c.ch == 0 as char {
-                        continue;
-                    }
-
-                    handle.draw_rectangle(
-                        j as i32 * 8,
-                        i as i32 * 20,
-                        20,
-                        8,
-                        c.bg_color.as_color(),
-                    );
-
-                    handle.draw_text_codepoint(
-                        font,
-                        c.ch as i32,
-                        Vector2::new(j as f32 * 8. + 2., i as f32 * 20. + 2.),
-                        16.,
-                        c.fg_col.as_color(),
-                    );
-                } else {
-                    for k in 0..20 {
-                        for l in 0..8 {
-                            handle.draw_pixel(
-                                (j * 8 + l) as i32,
-                                (i * 20 + k) as i32,
-                                c.cols[k][l].as_color(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn shift_chars(&mut self) {
-        for i in 0..23 {
-            for j in 0..80 {
-                if self.buffer[i + 1][j].is_char {
-                    self.buffer[i][j] = self.buffer[i + 1][j];
-                } else {
-                    self.buffer[i][j] = CharCell::new();
-                }
-            }
-        }
-    }
-
-    pub fn del_char(&mut self) {
-        if self.cursor_x == 0 {
-            if self.cursor_y == 0 {
-                return;
-            }
-            self.cursor_y -= 1;
-            self.cursor_x = 79;
-        } else {
-            self.cursor_x -= 1;
-        }
-        if self.buffer[self.cursor_y as usize][self.cursor_x as usize].is_char {
-            self.buffer[self.cursor_y as usize][self.cursor_x as usize] = CharCell::new();
-        }
-    }
-
-    pub fn put_char(&mut self, c: char) {
-        if c == '\r' {
-            self.cursor_x = 0;
-            return;
-        }
-        if c == '\n' {
-            if self.cursor_y == 23 {
-                self.shift_chars();
-                self.cursor_x = 0;
-            } else {
-                self.cursor_x = 0;
-                self.cursor_y += 1;
-            }
-            return;
-        } else if c == 127 as char {
-            self.del_char();
-            return;
-        }
-        if self.cursor_x == 79 {
-            if self.cursor_y == 23 {
-                self.shift_chars();
-                self.cursor_x = 0;
-            } else {
-                self.cursor_x = 0;
-                self.cursor_y += 1;
-            }
-        }
-        self.buffer[self.cursor_y as usize][self.cursor_x as usize] = CharCell {
-            bg_color: self.current_bg_color,
-            fg_col: self.current_fg_color,
-            is_char: true,
-            ch: c,
-            cols: [[Col::Black; _]; _],
-        };
-        self.cursor_x += 1;
-        if self.cursor_x >= 80 {
-            self.cursor_x = 79;
-        }
-        if self.cursor_y >= 24 {
-            self.cursor_y = 23;
-        }
-    }
-
-    pub fn write_s(&mut self, s: &str) {
-        for i in s.chars() {
-            self.put_char(i);
-        }
-    }
-
-    pub fn put_pixel(&mut self, x: i16, y: i16, col: Col) {
-        let x1 = x / 8;
-        let xoff = x % 8;
-        let y1 = y / 20;
-        let yoff = y % 20;
-        self.buffer[y1 as usize][x1 as usize].cols[yoff as usize][xoff as usize] = col;
-        self.buffer[y1 as usize][x1 as usize].is_char = false;
-    }
-}
-
-impl CharCell {
-    pub const fn new() -> Self {
-        CharCell {
-            fg_col: Col::Green,
-            bg_color: Col::Black,
-            ch: 0 as char,
-            is_char: true,
-            cols: [[Col::Black; _]; _],
+impl Drop for IOInner {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.font);
+            ManuallyDrop::drop(&mut self.render_texture);
         }
     }
 }
@@ -298,39 +216,477 @@ impl Col {
     }
 }
 
-pub const COLORS: [Col; 17] = [
-    Col::Black,
-    Col::White,
-    Col::Red,
-    Col::Cyan,
-    Col::Violet,
-    Col::Green,
-    Col::Blue,
-    Col::Yellow,
-    Col::Orange,
-    Col::Brown,
-    Col::LightRed,
-    Col::DarkGrey,
-    Col::Grey,
-    Col::LightGreen,
-    Col::LightBlue,
-    Col::LightGrey,
-    Col::Blank,
-];
-
-pub fn write_s(s: &str) {
-    FRAME.lock().unwrap().write_s(s);
-}
-
-pub fn write_pixel(x: i16, y: i16, col: Col) {
-    FRAME.lock().unwrap().put_pixel(x, y, col);
-}
-
-pub fn write_rect(x: i16, y: i16, w: i16, h: i16, col: Col) {
-    let mut frame = FRAME.lock().unwrap();
-    for y1 in y..y + h {
-        for x1 in x..x + w {
-            frame.put_pixel(x1, y1, col);
+impl FrameBuffer {
+    pub fn new() -> Self {
+        Self {
+            objects: Vec::new(),
+            write_buffer: Vec::new(),
+            images: Vec::new(),
+            terminal_mode: true,
+            input: Input::new(),
+            fg_color: Col::Green,
+            bg_color: Col::Black,
         }
+    }
+
+    pub fn render_out<T>(
+        &mut self,
+        draw: &mut RaylibTextureMode<T>,
+        font: &Font,
+        objects: Vec<Drawbject>,
+        base_x: i32,
+        base_y: i32,
+        _end_x: i32,
+        end_y: i32,
+    ) {
+        fn h_round(v: i32) -> i32 {
+            if v % 20 != 0 { v + 20 - v % 20 } else { v }
+        }
+        fn w_round(v: i32) -> i32 {
+            if v % 8 != 0 { v + 8 - v % 80 } else { v }
+        }
+        let mut y = base_y;
+        let mut x = base_x;
+        if end_y - base_y > 480 {
+            y -= end_y - base_y - 480;
+        }
+        for i in objects {
+            match i {
+                Drawbject::Shift { dx: _, dy: _ } => {
+                    _ = ();
+                }
+                Drawbject::Move { x: _, y: _ } => {
+                    _ = ();
+                }
+                Drawbject::CharSeq {
+                    x: _,
+                    y: _,
+                    max_w: _,
+                    user_input: _,
+                    fg_color,
+                    bg_color: _,
+                    seq,
+                } => {
+                    for i in seq.chars() {
+                        if i != '\n' {
+                            draw.draw_text_codepoint(
+                                font,
+                                i as i32,
+                                Vector2::new(x as f32, y as f32),
+                                16.,
+                                fg_color.as_color(),
+                            );
+                            x += 8;
+                            if x >= 640 {
+                                x = base_x;
+                                y += 20;
+                            }
+                        } else {
+                            x = base_x;
+                            y += 20;
+                        }
+                    }
+                }
+                Drawbject::Rectangle {
+                    x: _,
+                    y: _,
+                    w,
+                    h,
+                    col,
+                } => {
+                    draw.draw_rectangle(x, y, w as i32, h as i32, col.as_color());
+                    x += w_round(w as i32);
+                    y += h_round(h as i32);
+                    if x > 640 {
+                        x = base_x;
+                        y += 20;
+                    }
+                }
+                Drawbject::Circle { x: _, y: _, r, col } => {
+                    draw.draw_circle(x, y, r as f32, col.as_color());
+                    x += w_round(r as i32);
+                    y += h_round(r as i32);
+                    if x > 640 {
+                        x = base_x;
+                        y += 20;
+                    }
+                }
+                Drawbject::Image { x, y, w, h, img } => todo!(),
+            }
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        handle: &mut RaylibHandle,
+        font: &Font,
+        thread: &RaylibThread,
+        texture: &mut RenderTexture2D,
+    ) {
+        let should_close = self.input.window_should_close;
+        self.input = generate_input(handle, 2., 2.);
+        self.input.window_should_close = self.input.window_should_close || should_close;
+        fn h_round(v: i32) -> i32 {
+            if v % 20 != 0 { v + 20 - v % 20 } else { v }
+        }
+        fn w_round(v: i32) -> i32 {
+            if v % 8 != 0 { v + 8 - v % 80 } else { v }
+        }
+        let mut draw = handle.begin_texture_mode(&thread, texture);
+        draw.clear_background(Color::BLACK);
+        if self.terminal_mode {
+            let mut current: Vec<Drawbject> = Vec::new();
+            let mut base_x = 0;
+            let mut base_y = 0;
+            let mut cx = 0;
+            let mut cy = 0;
+            for i in self.objects.clone() {
+                match &i {
+                    Drawbject::Shift { dx, dy } => {
+                        self.render_out(&mut draw, font, current.clone(), base_x, base_y, cx, cy);
+                        base_x = cx + *dx as i32 * 8;
+                        base_y = cy + *dy as i32 * 20;
+                        current.clear();
+                    }
+                    Drawbject::Move { x, y } => {
+                        base_x = *x as i32 * 8;
+                        base_y = *y as i32 * 20;
+                        cx = base_x;
+                        cy = base_y;
+                        self.render_out(&mut draw, font, current.clone(), base_x, base_y, cx, cy);
+                        current.clear();
+                    }
+                    Drawbject::CharSeq {
+                        x: _,
+                        y: _,
+                        max_w: _,
+                        user_input: _,
+                        fg_color: _,
+                        bg_color: _,
+                        seq,
+                    } => {
+                        for c in seq.chars() {
+                            if c == '\n' {
+                                cx = base_x;
+                                cy += 20;
+                            } else {
+                                cx += 8;
+                                if cx >= 640 {
+                                    cx = base_x;
+                                    cy += 20;
+                                }
+                            }
+                        }
+                        current.push(i.clone());
+                    }
+                    Drawbject::Rectangle {
+                        x: _,
+                        y: _,
+                        w,
+                        h,
+                        col: _,
+                    } => {
+                        cx += w_round(*w as i32);
+                        cy += h_round(*h as i32);
+                        if cx > 640 {
+                            cx = base_x;
+                            cy += 20;
+                        }
+                        current.push(i.clone());
+                    }
+                    Drawbject::Circle {
+                        x: _,
+                        y: _,
+                        r,
+                        col: _,
+                    } => {
+                        cx += w_round(*r as i32);
+                        if cx > 640 {
+                            cx = base_x;
+                            cy += 20;
+                        }
+                        cy += h_round(*r as i32);
+                        current.push(i.clone());
+                    }
+                    Drawbject::Image {
+                        x: _,
+                        y: _,
+                        w,
+                        h,
+                        img: _,
+                    } => {
+                        cx += w_round(*w as i32);
+                        cy += h_round(*h as i32);
+                        if cx > 640 {
+                            cx = base_x;
+                            cy += 20;
+                        }
+                        current.push(i.clone());
+                    }
+                }
+            }
+            self.render_out(&mut draw, font, current.clone(), base_x, base_y, cx, cy);
+        } else {
+            for i in self.objects.clone() {
+                match i {
+                    Drawbject::Shift { dx: _, dy: _ } => {}
+                    Drawbject::Move { x: _, y: _ } => {}
+                    Drawbject::CharSeq {
+                        x,
+                        y,
+                        user_input: _,
+                        fg_color,
+                        max_w,
+                        bg_color: _,
+                        seq,
+                    } => {
+                        let mut dx = x;
+                        let mut dy = y;
+                        let max_x = x + max_w;
+                        for i in seq.chars() {
+                            draw.draw_text_codepoint(
+                                &font,
+                                i as i32,
+                                Vector2::new(dx as f32, dy as f32),
+                                16.,
+                                fg_color.as_color(),
+                            );
+                            dx += 8;
+                            dy += 20;
+                            if dx > max_x {
+                                dx = x;
+                                dy += 20;
+                            }
+                        }
+                    }
+                    Drawbject::Rectangle { x, y, w, h, col } => {
+                        draw.draw_rectangle(x as i32, y as i32, w as i32, h as i32, col.as_color());
+                    }
+                    Drawbject::Circle { x, y, r, col } => {
+                        draw.draw_circle(x as i32, y as i32, r as f32, col.as_color());
+                    }
+                    Drawbject::Image {
+                        x: _,
+                        y: _,
+                        w: _,
+                        h: _,
+                        img: _,
+                    } => {
+                        todo!()
+                    }
+                }
+            }
+        }
+        drop(draw);
+        let mut draw = handle.begin_drawing(&thread);
+        draw.clear_background(Color::BLACK);
+        draw.draw_texture_pro(
+            texture.texture(),
+            Rectangle::new(0.0, 0.0, 640., -480.),
+            Rectangle::new(0.0, 0.0, 640. * 2., 480. * 2.),
+            Vector2::zero(),
+            0.0,
+            Color::WHITE,
+        );
+        draw.draw_fps(1000, 80);
+    }
+}
+
+pub fn add_char_seq(
+    objects: &mut Vec<Drawbject>,
+    chars: &str,
+    ifg_color: Col,
+    ibg_color: Col,
+    is_user_input: bool,
+) {
+    if let Some(mut x) = objects.pop() {
+        match &mut x {
+            Drawbject::CharSeq {
+                x: _,
+                y: _,
+                max_w: _,
+                user_input,
+                fg_color,
+                bg_color,
+                seq,
+            } => {
+                if *user_input == is_user_input {
+                    if *fg_color == ifg_color && *bg_color == ibg_color {
+                        *seq += chars;
+                        objects.push(x);
+                    } else {
+                        objects.push(x);
+                        objects.push(Drawbject::CharSeq {
+                            x: 0,
+                            y: 0,
+                            max_w: 0,
+                            user_input: is_user_input,
+                            fg_color: ifg_color,
+                            bg_color: ibg_color,
+                            seq: chars.to_string(),
+                        });
+                    }
+                } else {
+                    objects.push(x);
+                    objects.push(Drawbject::CharSeq {
+                        x: 0,
+                        y: 0,
+                        max_w: 0,
+                        user_input: is_user_input,
+                        fg_color: ifg_color,
+                        bg_color: ibg_color,
+                        seq: chars.to_string(),
+                    });
+                }
+            }
+            _ => {
+                objects.push(x);
+                objects.push(Drawbject::CharSeq {
+                    x: 0,
+                    y: 0,
+                    max_w: 0,
+                    user_input: is_user_input,
+                    fg_color: ifg_color,
+                    bg_color: ibg_color,
+                    seq: chars.to_string(),
+                });
+            }
+        }
+    } else {
+        objects.push(Drawbject::CharSeq {
+            x: 0,
+            y: 0,
+            max_w: 0,
+            user_input: is_user_input,
+            fg_color: ifg_color,
+            bg_color: ibg_color,
+            seq: chars.to_string(),
+        });
+    }
+}
+
+pub fn add_char(
+    objects: &mut Vec<Drawbject>,
+    ch: char,
+    ifg_color: Col,
+    ibg_color: Col,
+    is_user_input: bool,
+) {
+    if let Some(mut x) = objects.pop() {
+        match &mut x {
+            Drawbject::CharSeq {
+                x: _,
+                y: _,
+                max_w: _,
+                user_input,
+                fg_color,
+                bg_color,
+                seq,
+            } => {
+                if *user_input == is_user_input {
+                    if *fg_color == ifg_color && *bg_color == ibg_color {
+                        seq.push(ch);
+                        objects.push(x);
+                    } else {
+                        objects.push(x);
+                        objects.push(Drawbject::CharSeq {
+                            x: 0,
+                            y: 0,
+                            max_w: 0,
+                            user_input: is_user_input,
+                            fg_color: ifg_color,
+                            bg_color: ibg_color,
+                            seq: ch.to_string(),
+                        });
+                    }
+                } else {
+                    objects.push(x);
+                    objects.push(Drawbject::CharSeq {
+                        x: 0,
+                        y: 0,
+                        max_w: 0,
+                        user_input: is_user_input,
+                        fg_color: ifg_color,
+                        bg_color: ibg_color,
+                        seq: ch.to_string(),
+                    });
+                }
+            }
+            _ => {
+                objects.push(x);
+                objects.push(Drawbject::CharSeq {
+                    x: 0,
+                    y: 0,
+                    max_w: 0,
+                    user_input: is_user_input,
+                    fg_color: ifg_color,
+                    bg_color: ibg_color,
+                    seq: ch.to_string(),
+                });
+            }
+        }
+    } else {
+        objects.push(Drawbject::CharSeq {
+            x: 0,
+            y: 0,
+            max_w: 0,
+            user_input: is_user_input,
+            fg_color: ifg_color,
+            bg_color: ibg_color,
+            seq: ch.to_string(),
+        });
+    }
+}
+
+pub fn put_str(s: &str) {
+    let mut lock = FRAME_BUFFER.lock().unwrap();
+    let fg = lock.fg_color;
+    let bg = lock.bg_color;
+    if lock.terminal_mode {
+        add_char_seq(&mut lock.objects, s, fg, bg, false);
+    } else {
+        add_char_seq(&mut lock.write_buffer, s, fg, bg, false);
+    }
+}
+
+pub fn put_rect(w: i32, h: i32, col: Col) {
+    let mut lock = FRAME_BUFFER.lock().unwrap();
+    if lock.terminal_mode {
+        lock.objects.push(Drawbject::Rectangle {
+            x: 0,
+            y: 0,
+            w: w as i16,
+            h: h as i16,
+            col,
+        })
+    } else {
+        lock.write_buffer.push(Drawbject::Rectangle {
+            x: 0,
+            y: 0,
+            w: w as i16,
+            h: h as i16,
+            col,
+        })
+    }
+}
+
+pub fn window_should_close() -> bool {
+    FRAME_BUFFER.lock().unwrap().input.window_should_close
+}
+
+#[macro_export]
+macro_rules! _start {
+    ($blck:block) => {
+        fn main() {
+            let thread = std::thread::spawn(|| $blck);
+            io::run(thread);
+        }
+    };
+}
+
+pub fn run(thread: JoinHandle<()>) {
+    let mut io = IOInner::create();
+    while !thread.is_finished() {
+        io.update();
     }
 }
