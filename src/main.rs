@@ -11,8 +11,12 @@ _start! {{
     for i in 0..20{
         put_str(&format!("[ {} ]",i));
     }
+    let mut idx = 0usize;
     while !window_should_close(){
-        put_rect(40, 40, Col::Cyan);
-        std::thread::sleep(Duration::from_millis(1000));
+        for i in 0..20{
+            put_str(&format!("  i  "));
+        }
+        idx += 20;
+        std::thread::sleep(std::time::Duration::from_millis(16));
     }
 }}

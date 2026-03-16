@@ -260,7 +260,7 @@ impl FrameBuffer {
             y -= end_y - base_y - 460;
         }
         for i in objects {
-            match i {
+            match &i {
                 Drawbject::Shift { dx: _, dy: _ } => {
                     _ = ();
                 }
@@ -276,11 +276,11 @@ impl FrameBuffer {
                     bg_color: _,
                     seq,
                 } => {
-                    for i in seq.chars() {
-                        if i != '\n' {
+                    for c in seq.chars() {
+                        if c != '\n' {
                             draw.draw_text_codepoint(
                                 font,
-                                i as i32,
+                                c as i32,
                                 Vector2::new(x as f32, y as f32),
                                 16.,
                                 fg_color.as_color(),
@@ -303,18 +303,18 @@ impl FrameBuffer {
                     h,
                     col,
                 } => {
-                    draw.draw_rectangle(x, y, w as i32, h as i32, col.as_color());
-                    x += w_round(w as i32);
-                    y += h_round(h as i32 - 20);
+                    draw.draw_rectangle(x, y, *w as i32, *h as i32, col.as_color());
+                    x += w_round(*w as i32);
+                    y += h_round(*h as i32 - 20);
                     if x > 640 {
                         x = base_x;
                         y += 20;
                     }
                 }
                 Drawbject::Circle { x: _, y: _, r, col } => {
-                    draw.draw_circle(x, y, r as f32, col.as_color());
-                    x += w_round(r as i32);
-                    y += h_round(r as i32);
+                    draw.draw_circle(x, y, *r as f32, col.as_color());
+                    x += w_round(*r as i32);
+                    y += h_round(*r as i32);
                     if x > 640 {
                         x = base_x;
                         y += 20;
@@ -382,6 +382,43 @@ impl FrameBuffer {
         let mut draw = handle.begin_texture_mode(&thread, texture);
         draw.clear_background(Color::BLACK);
         if self.terminal_mode {
+            if self.objects.len() > 200 {
+                let min = self.objects.len() - 100;
+                self.objects = self
+                    .objects
+                    .clone()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|i| i.0 > min)
+                    .map(|i| i.1)
+                    .map(|mut i| {
+                        match &mut i {
+                            Drawbject::CharSeq {
+                                x: _,
+                                y: _,
+                                max_w: _,
+                                user_input: _,
+                                fg_color: _,
+                                bg_color: _,
+                                seq,
+                            } => {
+                                let l = seq.len();
+                                if l > 4000 {
+                                    let tmp: String = seq
+                                        .chars()
+                                        .enumerate()
+                                        .filter(|i| i.0 > l - 2000)
+                                        .map(|i| i.1)
+                                        .collect();
+                                    *seq = tmp;
+                                }
+                            }
+                            _ => {}
+                        };
+                        i
+                    })
+                    .collect();
+            }
             let mut current: Vec<Drawbject> = Vec::new();
             let mut base_x = 0;
             let mut base_y = 0;
@@ -390,7 +427,15 @@ impl FrameBuffer {
             for i in self.objects.clone() {
                 match &i {
                     Drawbject::Shift { dx, dy } => {
-                        self.render_out(&mut draw, font, current.clone(), base_x, base_y, cx, cy);
+                        let tmp = self.render_out(
+                            &mut draw,
+                            font,
+                            current.clone(),
+                            base_x,
+                            base_y,
+                            cx,
+                            cy,
+                        );
                         base_x = cx + *dx as i32 * 8;
                         base_y = cy + *dy as i32 * 20;
                         current.clear();
@@ -400,7 +445,15 @@ impl FrameBuffer {
                         base_y = *y as i32 * 20;
                         cx = base_x;
                         cy = base_y;
-                        self.render_out(&mut draw, font, current.clone(), base_x, base_y, cx, cy);
+                        let tmp = self.render_out(
+                            &mut draw,
+                            font,
+                            current.clone(),
+                            base_x,
+                            base_y,
+                            cx,
+                            cy,
+                        );
                         current.clear();
                     }
                     Drawbject::CharSeq {
