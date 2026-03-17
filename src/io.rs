@@ -14,6 +14,7 @@ use raylib::{
     text::Font,
     texture::RenderTexture2D,
 };
+pub use stabby::str::Str as StabStr;
 pub use stabby::string::String as StabString;
 pub use stabby::vec::Vec as StabVec;
 use std::mem::ManuallyDrop;
@@ -722,6 +723,7 @@ fn add_char_seq(
         });
     }
 }
+
 fn add_char(
     objects: &mut Vec<Drawbject>,
     ch: char,
@@ -829,6 +831,7 @@ pub fn put_rect(w: i32, h: i32, col: Col) {
     }
 }
 
+#[stabby::stabby]
 pub fn window_should_close() -> bool {
     let out = FRAME_BUFFER.lock().unwrap().input.window_should_close;
     out
@@ -854,35 +857,82 @@ pub fn run(thread: JoinHandle<()>) {
     }
 }
 
-pub fn get_char() -> char {
+#[stabby::stabby]
+pub fn get_char() -> i32 {
     loop {
         let mut frame = FRAME_BUFFER.lock().unwrap();
         if frame.input.window_should_close {
-            return 0 as char;
+            return 0;
         } else if let Some(c) = frame.last_char.take() {
-            return c;
+            return c as i32;
         }
         drop(frame);
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }
 
-pub fn get_line() -> String {
+#[stabby::stabby]
+pub fn get_line() -> StabString {
     loop {
         let mut frame = FRAME_BUFFER.lock().unwrap();
         if frame.input.window_should_close {
-            return String::new();
+            return String::new().into();
         } else if let Some((a, b)) = frame.input_string.split_once('\n') {
             let out = a.to_string();
             let rem = b.to_string();
             frame.input_string = rem;
-            return out;
+            return out.into();
         }
         drop(frame);
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }
 
-pub fn get_input_char() -> Option<char> {
-    FRAME_BUFFER.lock().unwrap().frame_char
+#[stabby::stabby]
+pub fn get_input_char() -> i32 {
+    if let Some(x) = FRAME_BUFFER.lock().unwrap().frame_char {
+        x as i32
+    } else {
+        0
+    }
 }
+
+#[stabby::stabby]
+pub fn execute_program(to_run: StabStr, args: stabby::slice::Slice<'_, StabStr>) -> i8 {
+    unsafe {
+        let f = libloading::Library::new(to_run.as_str()).unwrap(); 
+        let mut iargs:StabVec<StabStr> = StabVec::new();
+        iargs.push(to_run);
+        for i in args.as_slice(){
+            iargs.push(*i);
+        }
+        let x:stabby::slice::Slice<'_, StabStr> = iargs.as_slice().into();
+        let s: Result<
+            libloading::Symbol<'_, unsafe extern "C" fn(stabby::slice::Slice<'_, StabStr>) -> i32>,
+            _,
+        > = f.get("_prog_start");
+        let mut sym: 
+            libloading::Symbol<'_, *mut unsafe extern "C" fn( StabStr) -> ()>= f.get("put_str").unwrap();
+        **sym = put_str;
+        
+        let Ok(func) = s else {
+            println!("failed to find _prog_start");
+            return -1;
+        };
+        (*func)(x);
+        return 0;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn put_str_c(s: stabby::str::Str) {
+    let mut lock = FRAME_BUFFER.lock().unwrap();
+    let fg = lock.fg_color;
+    let bg = lock.bg_color;
+    if lock.terminal_mode {
+        add_char_seq(&mut lock.objects, s.as_str(), fg, bg, false);
+    } else {
+        add_char_seq(&mut lock.write_buffer, s.as_str(), fg, bg, false);
+    }
+}
+
