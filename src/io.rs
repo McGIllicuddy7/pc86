@@ -1,5 +1,6 @@
 pub type KeyboardKey = raylib::ffi::KeyboardKey;
 pub type MouseButton = raylib::ffi::MouseButton;
+
 use lazy_static::lazy_static;
 use raylib::prelude::RaylibDrawHandle;
 use raylib::texture::{RaylibRenderTexture2D, Texture2D};
@@ -13,6 +14,8 @@ use raylib::{
     text::Font,
     texture::RenderTexture2D,
 };
+pub use stabby::string::String as StabString;
+pub use stabby::vec::Vec as StabVec;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -28,6 +31,7 @@ pub struct IOInner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[stabby::stabby]
 pub enum Col {
     Black,
     White,
@@ -409,7 +413,8 @@ impl FrameBuffer {
                                         .enumerate()
                                         .filter(|i| i.0 > l - 2000)
                                         .map(|i| i.1)
-                                        .collect();
+                                        .collect::<std::string::String>()
+                                        .into();
                                     *seq = tmp;
                                 }
                             }
@@ -438,7 +443,7 @@ impl FrameBuffer {
                         );
                         base_x = cx + *dx as i32 * 8;
                         base_y = cy + *dy as i32 * 20;
-                        current.clear();
+                        current = Vec::new();
                     }
                     Drawbject::Move { x, y } => {
                         base_x = *x as i32 * 8;
@@ -454,7 +459,7 @@ impl FrameBuffer {
                             cx,
                             cy,
                         );
-                        current.clear();
+                        current = Vec::new()
                     }
                     Drawbject::CharSeq {
                         x: _,
@@ -592,8 +597,7 @@ impl FrameBuffer {
         draw
     }
 }
-
-pub fn handle_char_input(
+fn handle_char_input(
     objects: &mut Vec<Drawbject>,
     ch: char,
     ifg_color: Col,
@@ -646,7 +650,7 @@ pub fn handle_char_input(
         }
     }
 }
-pub fn add_char_seq(
+fn add_char_seq(
     objects: &mut Vec<Drawbject>,
     chars: &str,
     ifg_color: Col,
@@ -718,8 +722,7 @@ pub fn add_char_seq(
         });
     }
 }
-
-pub fn add_char(
+fn add_char(
     objects: &mut Vec<Drawbject>,
     ch: char,
     ifg_color: Col,
@@ -792,17 +795,19 @@ pub fn add_char(
     }
 }
 
-pub fn put_str(s: &str) {
+#[stabby::stabby]
+pub fn put_str(s: stabby::str::Str) {
     let mut lock = FRAME_BUFFER.lock().unwrap();
     let fg = lock.fg_color;
     let bg = lock.bg_color;
     if lock.terminal_mode {
-        add_char_seq(&mut lock.objects, s, fg, bg, false);
+        add_char_seq(&mut lock.objects, s.as_str(), fg, bg, false);
     } else {
-        add_char_seq(&mut lock.write_buffer, s, fg, bg, false);
+        add_char_seq(&mut lock.write_buffer, s.as_str(), fg, bg, false);
     }
 }
 
+#[stabby::stabby]
 pub fn put_rect(w: i32, h: i32, col: Col) {
     let mut lock = FRAME_BUFFER.lock().unwrap();
     if lock.terminal_mode {
@@ -831,7 +836,7 @@ pub fn window_should_close() -> bool {
 
 #[macro_export]
 macro_rules! _start {
-    ($blck:block) => {
+    ($blck:tt) => {
         fn main() {
             let thread = std::thread::spawn(|| $blck);
             io::run(thread);
@@ -847,4 +852,37 @@ pub fn run(thread: JoinHandle<()>) {
             break;
         }
     }
+}
+
+pub fn get_char() -> char {
+    loop {
+        let mut frame = FRAME_BUFFER.lock().unwrap();
+        if frame.input.window_should_close {
+            return 0 as char;
+        } else if let Some(c) = frame.last_char.take() {
+            return c;
+        }
+        drop(frame);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
+pub fn get_line() -> String {
+    loop {
+        let mut frame = FRAME_BUFFER.lock().unwrap();
+        if frame.input.window_should_close {
+            return String::new();
+        } else if let Some((a, b)) = frame.input_string.split_once('\n') {
+            let out = a.to_string();
+            let rem = b.to_string();
+            frame.input_string = rem;
+            return out;
+        }
+        drop(frame);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
+pub fn get_input_char() -> Option<char> {
+    FRAME_BUFFER.lock().unwrap().frame_char
 }

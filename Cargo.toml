@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 lazy_static = "1.5.0"
 raylib = "5.5.1"
+stabby = "72.1.1"
