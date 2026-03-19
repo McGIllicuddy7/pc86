@@ -1,6 +1,5 @@
 pub type KeyboardKey = raylib::ffi::KeyboardKey;
 pub type MouseButton = raylib::ffi::MouseButton;
-
 use lazy_static::lazy_static;
 use raylib::prelude::RaylibDrawHandle;
 use raylib::texture::{RaylibRenderTexture2D, Texture2D};
@@ -14,9 +13,11 @@ use raylib::{
     text::Font,
     texture::RenderTexture2D,
 };
+use stabby::slice::Slice;
 pub use stabby::str::Str as StabStr;
 pub use stabby::string::String as StabString;
 pub use stabby::vec::Vec as StabVec;
+pub use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -73,10 +74,23 @@ pub const COLORS: [Col; 17] = [
     Col::Blank,
 ];
 
+pub struct ImageData {
+    data: Box<[Col]>,
+    w: i32,
+    h: i32,
+    tex: Option<Texture2D>,
+}
+
+#[derive(Clone, Debug, Copy)]
+#[stabby::stabby]
+pub struct Image {
+    inner: u32,
+}
+
 pub struct FrameBuffer {
     pub objects: Vec<Drawbject>,
     pub write_buffer: Vec<Drawbject>,
-    pub images: Vec<Arc<RwLock<ImageInner>>>,
+    pub images: HashMap<u32, Arc<RwLock<ImageData>>>,
     pub terminal_mode: bool,
     pub input: Input,
     pub fg_color: Col,
@@ -125,20 +139,17 @@ pub enum Drawbject {
         h: i16,
         img: Image,
     },
+    Line {
+        x0: i16,
+        y0: i16,
+        x1: i16,
+        y1: i16,
+        col: Col,
+    },
 }
-#[derive(Clone, Debug)]
-pub struct Image {
-    inner: Arc<RwLock<ImageInner>>,
-}
-pub struct ImageInner {
-    buffer: Box<[Col]>,
-    w: i16,
-    h: i16,
-    as_texture: Option<Texture2D>,
-}
-impl std::fmt::Debug for ImageInner {
+impl std::fmt::Debug for ImageData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#?}", &self.buffer)
+        write!(f, "{:#?}", "f")
     }
 }
 lazy_static! {
@@ -232,7 +243,7 @@ impl FrameBuffer {
         Self {
             objects: Vec::new(),
             write_buffer: Vec::new(),
-            images: Vec::new(),
+            images: HashMap::new(),
             terminal_mode: true,
             input: Input::new(),
             fg_color: Col::Green,
@@ -271,6 +282,21 @@ impl FrameBuffer {
                 }
                 Drawbject::Move { x: _, y: _ } => {
                     _ = ();
+                }
+                Drawbject::Line {
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    col,
+                } => {
+                    draw.draw_line(
+                        *x0 as i32,
+                        *y0 as i32,
+                        *x1 as i32,
+                        *y1 as i32,
+                        col.as_color(),
+                    );
                 }
                 Drawbject::CharSeq {
                     x: _,
@@ -500,6 +526,15 @@ impl FrameBuffer {
                         }
                         current.push(i.clone());
                     }
+                    Drawbject::Line {
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        col,
+                    } => {
+                        current.push(i.clone());
+                    }
                     Drawbject::Circle {
                         x: _,
                         y: _,
@@ -535,6 +570,15 @@ impl FrameBuffer {
         } else {
             for i in self.objects.clone() {
                 match i {
+                    Drawbject::Line {
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        col,
+                    } => {
+                        draw.draw_line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, col.as_color());
+                    }
                     Drawbject::Shift { dx: _, dy: _ } => {}
                     Drawbject::Move { x: _, y: _ } => {}
                     Drawbject::CharSeq {
@@ -596,6 +640,11 @@ impl FrameBuffer {
         );
         draw.draw_fps(1000, 80);
         draw
+    }
+
+    pub fn swap_buffers(&mut self) {
+        std::mem::swap(&mut self.write_buffer, &mut self.objects);
+        self.write_buffer.clear();
     }
 }
 fn handle_char_input(
@@ -797,19 +846,17 @@ fn add_char(
     }
 }
 
-#[stabby::stabby]
-pub fn put_str(s: stabby::str::Str) {
+pub fn put_str(s: &str) {
     let mut lock = FRAME_BUFFER.lock().unwrap();
     let fg = lock.fg_color;
     let bg = lock.bg_color;
     if lock.terminal_mode {
-        add_char_seq(&mut lock.objects, s.as_str(), fg, bg, false);
+        add_char_seq(&mut lock.objects, s, fg, bg, false);
     } else {
-        add_char_seq(&mut lock.write_buffer, s.as_str(), fg, bg, false);
+        return;
     }
 }
 
-#[stabby::stabby]
 pub fn put_rect(w: i32, h: i32, col: Col) {
     let mut lock = FRAME_BUFFER.lock().unwrap();
     if lock.terminal_mode {
@@ -821,17 +868,10 @@ pub fn put_rect(w: i32, h: i32, col: Col) {
             col,
         })
     } else {
-        lock.write_buffer.push(Drawbject::Rectangle {
-            x: 0,
-            y: 0,
-            w: w as i16,
-            h: h as i16,
-            col,
-        })
+        return;
     }
 }
 
-#[stabby::stabby]
 pub fn window_should_close() -> bool {
     let out = FRAME_BUFFER.lock().unwrap().input.window_should_close;
     out
@@ -857,7 +897,6 @@ pub fn run(thread: JoinHandle<()>) {
     }
 }
 
-#[stabby::stabby]
 pub fn get_char() -> i32 {
     loop {
         let mut frame = FRAME_BUFFER.lock().unwrap();
@@ -871,8 +910,7 @@ pub fn get_char() -> i32 {
     }
 }
 
-#[stabby::stabby]
-pub fn get_line() -> StabString {
+pub fn get_line() -> String {
     loop {
         let mut frame = FRAME_BUFFER.lock().unwrap();
         if frame.input.window_should_close {
@@ -881,14 +919,13 @@ pub fn get_line() -> StabString {
             let out = a.to_string();
             let rem = b.to_string();
             frame.input_string = rem;
-            return out.into();
+            return out;
         }
         drop(frame);
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }
 
-#[stabby::stabby]
 pub fn get_input_char() -> i32 {
     if let Some(x) = FRAME_BUFFER.lock().unwrap().frame_char {
         x as i32
@@ -897,42 +934,161 @@ pub fn get_input_char() -> i32 {
     }
 }
 
-#[stabby::stabby]
-pub fn execute_program(to_run: StabStr, args: stabby::slice::Slice<'_, StabStr>) -> i8 {
+pub fn execute_program(to_run: &str, args: &[&str]) -> i8 {
     unsafe {
-        let f = libloading::Library::new(to_run.as_str()).unwrap(); 
-        let mut iargs:StabVec<StabStr> = StabVec::new();
-        iargs.push(to_run);
-        for i in args.as_slice(){
-            iargs.push(*i);
+        let f = libloading::Library::new(to_run).unwrap();
+        let mut iargs: StabVec<StabStr> = StabVec::new();
+        iargs.push(to_run.into());
+        for i in args {
+            iargs.push((*i).into());
         }
-        let x:stabby::slice::Slice<'_, StabStr> = iargs.as_slice().into();
+        let x: stabby::slice::Slice<'_, StabStr> = iargs.as_slice().into();
         let s: Result<
             libloading::Symbol<'_, unsafe extern "C" fn(stabby::slice::Slice<'_, StabStr>) -> i32>,
             _,
         > = f.get("_prog_start");
-        let mut sym: 
-            libloading::Symbol<'_, *mut unsafe extern "C" fn( StabStr) -> ()>= f.get("put_str").unwrap();
-        **sym = put_str;
-        
+
         let Ok(func) = s else {
             println!("failed to find _prog_start");
             return -1;
         };
+        println!("running");
         (*func)(x);
         return 0;
     }
 }
 
+#[used]
+pub static SYS_PUT_STR: unsafe extern "C" fn(stabby::str::Str) = sys_put_str;
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn put_str_c(s: stabby::str::Str) {
-    let mut lock = FRAME_BUFFER.lock().unwrap();
-    let fg = lock.fg_color;
-    let bg = lock.bg_color;
-    if lock.terminal_mode {
-        add_char_seq(&mut lock.objects, s.as_str(), fg, bg, false);
+pub unsafe extern "C" fn sys_put_str(s: stabby::str::Str) {
+    put_str(s.as_str());
+}
+
+#[used]
+pub static SYS_TEST: unsafe extern "C" fn() = sys_test;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_test() {
+    println!("hello from c");
+}
+
+#[used]
+pub static SYS_WINDOW_SHOULD_CLOSE: unsafe extern "C" fn() -> bool = sys_window_should_close;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_window_should_close() -> bool {
+    window_should_close()
+}
+
+#[used]
+pub static SYS_PUT_RECT: unsafe extern "C" fn(i32, i32, Col) = sys_put_rect;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_put_rect(w: i32, h: i32, col: Col) {
+    put_rect(w, h, col);
+}
+#[used]
+pub static SYS_GET_CHAR: unsafe extern "C" fn() -> i32 = sys_get_char;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_get_char() -> i32 {
+    get_char()
+}
+
+#[used]
+pub static SYS_GET_LINE: unsafe extern "C" fn() -> StabString = sys_get_line;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_get_line() -> StabString {
+    get_line().into()
+}
+
+#[used]
+pub static SYS_GET_FRAME_CHAR: unsafe extern "C" fn() -> i32 = sys_get_input_char;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_get_input_char() -> i32 {
+    get_input_char()
+}
+
+#[used]
+pub static SYS_EXEC_PROGRAM: unsafe extern "C" fn(StabStr, &Slice<StabStr>) -> i8 =
+    sys_exec_program;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sys_exec_program(to_run: StabStr, args: &Slice<StabStr>) -> i8 {
+    let mut iargs = Vec::new();
+    for i in args.iter() {
+        iargs.push((*i).into());
+    }
+    execute_program(to_run.into(), &iargs)
+}
+
+pub fn display_set_graphics_modes() {
+    FRAME_BUFFER.lock().unwrap().terminal_mode = false;
+}
+
+pub fn display_set_text_mode() {
+    FRAME_BUFFER.lock().unwrap().terminal_mode = true;
+}
+
+pub fn display_swap_buffers() {
+    let mut frame = FRAME_BUFFER.lock().unwrap();
+    frame.swap_buffers();
+}
+
+pub fn display_draw_text(text: &str, x: i32, y: i32, w: i32) {
+    let mut frame = FRAME_BUFFER.lock().unwrap();
+    if frame.terminal_mode {
+        todo!();
     } else {
-        add_char_seq(&mut lock.write_buffer, s.as_str(), fg, bg, false);
+        let fg = frame.fg_color;
+        let bg = frame.bg_color;
+        frame.write_buffer.push(Drawbject::CharSeq {
+            x: x as i16,
+            y: y as i16,
+            max_w: w as i16,
+            user_input: false,
+            fg_color: fg,
+            bg_color: bg,
+            seq: text.into(),
+        });
+    }
+}
+pub fn display_draw_rect(x: i32, y: i32, w: i32, h: i32, col: Col) {
+    let mut frame = FRAME_BUFFER.lock().unwrap();
+    if frame.terminal_mode {
+        todo!();
+    } else {
+        frame.write_buffer.push(Drawbject::Rectangle {
+            x: x as i16,
+            y: y as i16,
+            w: w as i16,
+            h: h as i16,
+            col,
+        });
     }
 }
 
+pub fn display_draw_circle(x: i32, y: i32, r: i32, col: Col) {
+    let mut frame = FRAME_BUFFER.lock().unwrap();
+    if frame.terminal_mode {
+        todo!();
+    } else {
+        frame.write_buffer.push(Drawbject::Circle {
+            x: x as i16,
+            y: y as i16,
+            r: r as i16,
+            col,
+        });
+    }
+}
+
+pub fn display_draw_line(x0: i32, y0: i16, x1: i16, y1: i16, col: Col) {
+    let mut frame = FRAME_BUFFER.lock().unwrap();
+    if frame.terminal_mode {
+        todo!();
+    } else {
+        frame.write_buffer.push(Drawbject::Line {
+            x0: x0 as i16,
+            x1: x1 as i16,
+            y0: y0 as i16,
+            y1: y1 as i16,
+            col,
+        });
+    }
+}
