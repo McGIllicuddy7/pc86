@@ -88,7 +88,7 @@ pub struct Callback<T, U> {
     cb: Box<dyn FnMut(&T) -> CallbackResult<T, U> + Send + Sync>,
 }
 
-pub trait TObjectBuffer {
+pub trait TObjectBuffer: Send + Sync {
     fn delete_object(&self, at: u64, generation: u64);
     fn run_delete_queue(&self);
     fn object_capacity(&self) -> usize;
@@ -303,6 +303,36 @@ impl<T> ObjectBuffer<T> {
             self.deallocate_object_immediate(&rf);
         }
         guard.clear();
+    }
+
+    pub fn unsafe_allocate_object_at<'a>(
+        &'a self,
+        idx: u64,
+        generation: u64,
+        value: T,
+    ) -> Option<ObjectRef<'a, T>> {
+        if idx as usize > self.buffer.len() {
+            return None;
+        }
+        let mut guard = match self.buffer[idx as usize].write() {
+            Ok(p) => p,
+            Err(p) => p.into_inner(),
+        };
+        guard.value = Some(value);
+        guard.generation = generation;
+        Some(ObjectRef {
+            idx,
+            generation,
+            parent: Some(self),
+        })
+    }
+
+    pub fn unsafe_construct_reference<'a>(&'a self, idx: u64, generation: u64) -> ObjectRef<'a, T> {
+        ObjectRef {
+            idx,
+            generation,
+            parent: Some(self),
+        }
     }
 
     pub fn iter<'a>(&'a self) -> ObjectIterator<'a, T> {
@@ -809,7 +839,7 @@ macro_rules! poll {
     };
 }
 
-impl<T: Serialize + DeserializeOwned> TObjectBuffer for ObjectBuffer<T> {
+impl<T: Serialize + DeserializeOwned + Send + Sync> TObjectBuffer for ObjectBuffer<T> {
     fn delete_object(&self, at: u64, generation: u64) {
         self.deallocate_object(&ObjectRef {
             idx: at,
@@ -876,20 +906,167 @@ impl ECS {
         }
     }
 
-    pub fn alloc_entity(&self) {
-        for i in self.entities.iter() {}
+    pub fn alloc_entity(&self) -> Option<EntityId> {
+        for j in 1..self.entities.len() {
+            let i = &self.entities[j];
+            let mut guard = match i.write() {
+                Ok(x) => x,
+                Err(e) => e.into_inner(),
+            };
+            if !guard.is_valid {
+                guard.generation = guard.generation.wrapping_add(1);
+                return Some({
+                    EntityId {
+                        idx: j as u64,
+                        generation: guard.generation,
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    pub fn dealloc_entity(&self, id: EntityId) {
+        if id.idx as usize >= self.entities.len() {
+            return;
+        }
+        let mut guard = match self.entities[id.idx as usize].write() {
+            Ok(p) => p,
+            Err(p) => p.into_inner(),
+        };
+        if guard.is_valid && id.generation == guard.generation {
+            guard.is_valid = false;
+            let comps = match self.components.read() {
+                Ok(p) => p,
+                Err(p) => p.into_inner(),
+            };
+            for i in comps.iter() {
+                i.delete_object(id.idx, id.generation);
+            }
+        }
+    }
+    pub fn is_entity_valid(&self, id: EntityId) -> bool {
+        if id.idx as usize >= self.entities.len() {
+            return false;
+        }
+        if id.idx == 0 {
+            return false;
+        }
+        let guard = match self.entities[id.idx as usize].read() {
+            Ok(p) => p,
+            Err(p) => p.into_inner(),
+        };
+        guard.generation == id.generation && guard.is_valid
+    }
+}
+impl EntityId {
+    pub const fn new_invalid() -> Self {
+        Self {
+            idx: 0,
+            generation: 0,
+        }
+    }
+    pub const fn get_idx(&self) -> u64 {
+        self.idx
+    }
+    pub const fn get_gen(&self) -> u64 {
+        self.generation
     }
 }
 
 #[macro_export]
 macro_rules! make_ecs {
-    ($(
+    ($ecs_name:ident,$((
         $buffer_name:ident,
-        $comp_name:ident, $comp_type:ty, $addr_name:ident,
-        $remover_name:ident, $getter_name:ident,$mut_getter_name:ident,$reference_getter_name:ident,
-    ),*) => {
+        $comp_name:ident, $comp_type:ty, $adder_name:ident,
+        $remover_name:ident, $getter_name:ident,$mut_getter_name:ident,$reference_getter_name:ident
+    )),*) => {
+        lazy_static::lazy_static!{
+            pub static ref $ecs_name:ECS = ECS::new(&[$(
+                    &*$buffer_name,
+            )*]);
+        }
+        $(lazy_static::lazy_static!{
+                pub static ref $buffer_name:ObjectBuffer<$comp_type> = ObjectBuffer::new();
+        })*
+        #[derive(Clone,Copy)]
+        pub enum ComponentType{
+            $(
+                $comp_name
+            )*
+        }
+        #[derive(Clone, Copy)]
         pub struct Entity {
             id: EntityId,
         }
+        pub fn new_entity()->Option<Entity>{
+            Some(Entity{id:$ecs_name.alloc_entity()?})
+        }
+        pub fn delete_entity(entity:Entity){
+            $ecs_name.dealloc_entity(entity.id);
+        }
+        impl Entity{
+            pub const fn new_invalid()->Self{
+                Self{id:EntityId::new_invalid()}
+            }
+            pub const fn get_idx(&self)->u64{
+                self.id.get_idx()
+            }
+            pub const fn get_gen(&self)->u64{
+                self.id.get_gen()
+            }
+            pub fn is_valid(&self)->bool{
+                $ecs_name.is_entity_valid(self.id)
+            }
+            $(
+                pub fn $adder_name(&self, value:$comp_type){
+                    $buffer_name.unsafe_allocate_object_at(self.get_idx(), self.get_gen(), value);
+                }
+
+                pub fn $remover_name(&self){
+                    let Some(object) = self.$reference_getter_name()else{
+                        return;
+                    };
+                    $buffer_name.deallocate_object(&object);
+                }
+
+                pub fn $reference_getter_name(&self)->Option<ObjectRef<$comp_type>>{
+                    let mut rf = $buffer_name.unsafe_construct_reference(self.get_idx(), self.get_gen());
+                    if let Some(e) = rf.get(){
+                        Some(rf)
+                    }else{
+                        None
+                    }
+                }
+
+                pub fn $getter_name(&self)->Option<ObjectRead<$comp_type>>{
+                    self.$reference_getter_name()?.get()
+                }
+
+                pub fn $mut_getter_name(&self)->Option<ObjectWrite<$comp_type>>{
+                    self.$reference_getter_name()?.get_mut()
+                }
+            )*
+
+            pub fn has_comp(&self,comp:ComponentType)->bool{
+                match comp{
+                    $(
+                        ComponentType::$comp_name=>{
+                            self.$getter_name().is_some()
+                        }
+                    )*
+                }
+            }
+            pub fn has_comp_set(&self,comps:&[ComponentType])->bool{
+                for i in comps{
+                    if !self.has_comp(*i){
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+
+
     };
 }
