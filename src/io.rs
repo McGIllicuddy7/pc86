@@ -13,10 +13,6 @@ use raylib::{
     text::Font,
     texture::RenderTexture2D,
 };
-use stabby::slice::Slice;
-pub use stabby::str::Str as StabStr;
-pub use stabby::string::String as StabString;
-pub use stabby::vec::Vec as StabVec;
 pub use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, RwLock};
@@ -33,7 +29,6 @@ pub struct IOInner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-#[stabby::stabby]
 pub enum Col {
     Black,
     White,
@@ -82,7 +77,6 @@ pub struct ImageData {
 }
 
 #[derive(Clone, Debug, Copy)]
-#[stabby::stabby]
 pub struct Image {
     inner: u32,
 }
@@ -933,7 +927,7 @@ pub fn get_input_char() -> i32 {
         0
     }
 }
-
+/* 
 pub fn execute_program(to_run: &str, args: &[&str]) -> i8 {
     unsafe {
         let f = libloading::Library::new(to_run).unwrap();
@@ -1017,7 +1011,7 @@ pub unsafe extern "C" fn sys_exec_program(to_run: StabStr, args: &Slice<StabStr>
     }
     execute_program(to_run.into(), &iargs)
 }
-
+*/
 pub fn display_set_graphics_modes() {
     FRAME_BUFFER.lock().unwrap().terminal_mode = false;
 }
