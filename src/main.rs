@@ -7,5 +7,9 @@ TEST_ECS, (
     INT_BUFFER, IntegerComp, i32, add_integer, remove_integer, get_integer, get_integer_mut, get_integer_ref
     )
 }
-pub fn main() {}
+pub fn main() {
+    let x = new_entity().unwrap();
+    x.add_integer(10);
+    println!("{}", *x.get_integer().unwrap())
+}
 

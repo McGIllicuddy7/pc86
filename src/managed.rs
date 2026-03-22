@@ -1030,20 +1030,20 @@ macro_rules! make_ecs {
                     $buffer_name.deallocate_object(&object);
                 }
 
-                pub fn $reference_getter_name(&self)->Option<ObjectRef<$comp_type>>{
-                    let mut rf = $buffer_name.unsafe_construct_reference(self.get_idx(), self.get_gen());
-                    if let Some(e) = rf.get(){
+                pub fn $reference_getter_name<'a>(&'a self)->Option<ObjectRef<'a,$comp_type>>{
+                    let rf = $buffer_name.unsafe_construct_reference(self.get_idx(), self.get_gen());
+                    if rf.get().is_some(){
                         Some(rf)
                     }else{
                         None
                     }
                 }
 
-                pub fn $getter_name(&self)->Option<ObjectRead<$comp_type>>{
+                pub fn $getter_name<'a>(&'a self)->Option<ObjectRead<'a,$comp_type>>{
                     self.$reference_getter_name()?.get()
                 }
 
-                pub fn $mut_getter_name(&self)->Option<ObjectWrite<$comp_type>>{
+                pub fn $mut_getter_name<'a>(&'a self)->Option<ObjectWrite<'a,$comp_type>>{
                     self.$reference_getter_name()?.get_mut()
                 }
             )*
