@@ -1,0 +1,9 @@
+[package]
+name = "bios"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.29.0"
+image = "0.25.10"
+viuer = "0.11.0"
