@@ -60,6 +60,11 @@ pub struct BIOS {
     pub wait_queue: std::sync::Mutex<Vec<std::thread::Thread>>,
     pub input_string: std::sync::Mutex<String>,
 }
+impl Default for BIOS {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl BIOS {
     pub const fn new() -> Self {
         Self {
@@ -114,15 +119,28 @@ impl BIOS {
                             _ => {}
                         },
 
-                        _ => {
-                            todo!();
-                        }
+                        _ => {}
                     }
                 }
             }
         }
+        let _ = queue!(guard, style::SetBackgroundColor(style::Color::Reset));
+        let _ = queue!(guard, style::SetForegroundColor(style::Color::Reset));
+
         let _ = queue!(guard, crossterm::cursor::MoveTo(0, 0));
         let _ = queue!(guard, terminal::Clear(terminal::ClearType::All));
+        if should_exit() {
+            let _ = guard.flush();
+            let mut to_wake = match self.wait_queue.lock() {
+                Ok(x) => x,
+                Err(e) => e.into_inner(),
+            };
+            for i in to_wake.iter() {
+                i.unpark();
+            }
+            to_wake.clear();
+            return Ok(());
+        }
         let mut cfg = 15;
         let mut cbg = 0;
         let _ = queue!(
@@ -158,6 +176,7 @@ impl BIOS {
                     );
                 }
                 let _ = queue!(guard, crossterm::cursor::MoveTo(x as u16, y as u16));
+                let c = if c as u32 == 0 { ' ' } else { c };
                 let _ = queue!(guard, crossterm::style::Print(c))?;
             }
         }
@@ -186,6 +205,7 @@ impl BIOS {
         while self.should_continue.get() != 0 {
             let _ = self.update(&mut guard, &mut input);
         }
+        crossterm::execute!(&mut guard, crossterm::cursor::Show).unwrap();
         crossterm::terminal::disable_raw_mode().unwrap();
     }
 }
@@ -305,7 +325,7 @@ pub fn draw_line(x0: u16, y0: u16, x1: u16, y1: u16, col: u8) {
                 + (pos2.1 - y as f32) * (pos2.1 - y as f32);
             distance += delt;
         }
-        return distance.sqrt() / (max_count as f32 * 2.);
+        distance.sqrt() / (max_count as f32 * 2.)
     };
     while dt < len {
         let mut nx = bx + 1;
