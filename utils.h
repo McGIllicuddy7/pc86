@@ -78,6 +78,8 @@ void * arena_realloc(arena_t * arena,void * ptr, size_t base_count, size_t new_c
         (list).len += 1;\
     }\
 
+#define list_resize(list, new_size)\
+    {(list).items = arena_realloc((list).arena, list.items, (sizeof(*(list).items))*(list).cap,sizeof(*(list).items)*new_size); (list).cap =new_size; }
 make_array_type(uint8_t, u8)
 make_array_type(uint16_t, u16)
 make_array_type(uint32_t, u32)
@@ -93,3 +95,31 @@ make_array_type(bool, bool)
 make_array_type(string_t, string)
 
 string_t arena_fmt(arena_t * arena, const char * format, ...);
+string_list_t split_string_by(arena_t * arena, string_t s, const char delimator);
+u8_list_t read_file_to_bytes(arena_t * arena, char * file_name);
+string_t read_file_to_string(arena_t * arena, char * file_name);
+
+typedef enum {
+    TOKEN_TYPE_LITERAL, 
+    TOKEN_TYPE_IDENTIFIER,
+    TOKEN_TYPE_OPERATOR,
+    TOKEN_TYPE_SEPERATOR, 
+    TOKEN_TYPE_OPEN_DELIM, 
+    TOKEN_TYPE_CLOSE_DELIM,
+    TOKEN_TYPE_TOKEN_OPERATOR,
+}token_type_t;
+
+typedef struct {
+    token_type_t token_type;
+    int32_t line;
+    string_t source_file;
+    string_t contents;
+}token_t;
+#define SLICE(T,LIST...) {.items = (T[]){LIST}, .len = sizeof((T[]){LIST})}
+
+make_array_type(token_t, token);
+make_array_type(char,char);
+token_list_t tokenize_string(arena_t *arena,string_t file_name, string_t contents, string_list_t operators);
+
+typedef char_list_t string_builder_t;
+string_t string_builder_take(string_builder_t s);
